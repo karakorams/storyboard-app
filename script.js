@@ -34,6 +34,24 @@ document.addEventListener('DOMContentLoaded', () => {
         const regenerateBtn = newCut.querySelector('.regenerate-btn');
         regenerateBtn.addEventListener('click', () => handleRegenerate(cutItem));
 
+        // Setup clear button
+        const clearBtn = newCut.querySelector('.clear-script-btn');
+        clearBtn.addEventListener('click', () => {
+            const cutEl = clearBtn.closest('.cut-item');
+            cutEl.querySelectorAll('.script-input, .script-textarea').forEach(el => el.value = '');
+        });
+
+        // Copy script values from the previous cut if it exists
+        const allCuts = document.querySelectorAll('.cut-item');
+        if (allCuts.length > 0) {
+            const lastCut = allCuts[allCuts.length - 1];
+            newCut.querySelector('.script-bg').value = lastCut.querySelector('.script-bg').value;
+            newCut.querySelector('.script-camera').value = lastCut.querySelector('.script-camera').value;
+            newCut.querySelector('.script-mood').value = lastCut.querySelector('.script-mood').value;
+            newCut.querySelector('.script-elements').value = lastCut.querySelector('.script-elements').value;
+            newCut.querySelector('.script-detail').value = lastCut.querySelector('.script-detail').value;
+        }
+
         cutsContainer.appendChild(newCut);
 
         // Scroll to bottom gracefully
@@ -44,6 +62,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const initialCut = document.querySelector('.cut-item');
     const initialRegenerateBtn = initialCut.querySelector('.regenerate-btn');
     initialRegenerateBtn.addEventListener('click', () => handleRegenerate(initialCut));
+
+    // Setup initial clear script button handler (for CUT 1)
+    const initialClearBtn = initialCut.querySelector('.clear-script-btn');
+    initialClearBtn.addEventListener('click', () => {
+        initialCut.querySelectorAll('.script-input, .script-textarea').forEach(el => el.value = '');
+    });
 
     // Delete Selected Cuts
     deleteSelectedBtn.addEventListener('click', () => {
@@ -176,15 +200,29 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function generateCut(cutElement, style) {
-        const scriptText = cutElement.querySelector('.script-textarea').value;
+        const bg = cutElement.querySelector('.script-bg').value.trim();
+        const cam = cutElement.querySelector('.script-camera').value.trim();
+        const mood = cutElement.querySelector('.script-mood').value.trim();
+        const elements = cutElement.querySelector('.script-elements').value.trim();
+        const detail = cutElement.querySelector('.script-detail').value.trim();
+
+        const combinedScriptParts = [];
+        if (bg) combinedScriptParts.push(`[Background/Setting] ${bg}`);
+        if (cam) combinedScriptParts.push(`[Camera Angle] ${cam}`);
+        if (mood) combinedScriptParts.push(`[Atmosphere/Mood] ${mood}`);
+        if (elements) combinedScriptParts.push(`[Key Elements] ${elements}`);
+        if (detail) combinedScriptParts.push(`[Detailed Situation] ${detail}`);
+
+        const scriptText = combinedScriptParts.join(', ');
+
         const placeholder = cutElement.querySelector('.image-placeholder');
         const imgEl = cutElement.querySelector('.generated-image');
         const regenBtn = cutElement.querySelector('.regenerate-btn');
         const loader = placeholder.querySelector('.loader');
         const placeholderText = placeholder.querySelector('.placeholder-text');
 
-        if (!scriptText.trim()) {
-            showToast(`CUT ${cutElement.dataset.cutId}의 스크립트를 작성해주세요.`);
+        if (!scriptText) {
+            showToast(`CUT ${cutElement.dataset.cutId}의 스크립트를 하나 이상 작성해주세요.`);
             return;
         }
 
