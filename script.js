@@ -1,303 +1,426 @@
-document.addEventListener('DOMContentLoaded', () => {
-    // State
-    let selectedStyle = null;
-    let cutCounter = 1;
+(() => {
+  const COLS = 6;
+  const CELL = 44;
+  const RADIUS = 21;
+  const BASE_TIME = 10;
+  const MAX_STAGE = 100;
+  const TICK_MS = 80;
 
-    // Elements
-    const styleBtns = document.querySelectorAll('.style-btn');
-    const mainGenerateBtn = document.getElementById('mainGenerateBtn');
-    const addCutBtn = document.getElementById('addCutBtn');
-    const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
-    const saveSelectedBtn = document.getElementById('saveSelectedBtn');
-    const cutsContainer = document.getElementById('cutsContainer');
-    const cutTemplate = document.getElementById('cutTemplate');
-    const toastContainer = document.getElementById('toastContainer');
+  const PALETTE = [
+    '#82b8c4', '#cfc09a', '#d4e0e0', '#2e6b7c',
+    '#8aaf9c', '#ddc07a', '#c98fa0', '#a090c0'
+  ];
 
-    // Style Selection
-    styleBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            styleBtns.forEach(b => b.classList.remove('selected'));
-            btn.classList.add('selected');
-            selectedStyle = btn.dataset.style;
-        });
-    });
+  const boardEl = document.getElementById('board');
+  const boardWrapEl = document.getElementById('boardWrap');
+  const hintBarEl = document.getElementById('hintBar');
+  const floatingLayerEl = document.getElementById('floatingLayer');
+  const stageTitleEl = document.getElementById('stageTitle');
+  const timeLeftEl = document.getElementById('timeLeft');
+  const timerFillEl = document.getElementById('timerFill');
+  const clockHandEl = document.getElementById('clockHand');
+  const comboBadgeEl = document.getElementById('comboBadge');
+  const bestRecordEl = document.getElementById('bestRecord');
+  const overlayEl = document.getElementById('gameOverOverlay');
+  const gameOverTextEl = document.getElementById('gameOverText');
+  const restartBtn = document.getElementById('restartBtn');
 
-    // Add new Cut
-    addCutBtn.addEventListener('click', () => {
-        cutCounter++;
-        const newCut = cutTemplate.content.cloneNode(true);
-        const cutItem = newCut.querySelector('.cut-item');
-        cutItem.dataset.cutId = cutCounter;
-        newCut.querySelector('.cut-number').textContent = cutCounter;
+  let stage = 1;
+  let combo = 0;
+  let timeLeft = BASE_TIME;
+  let timerId = null;
+  let handDeg = 0;
+  let isRunning = false;
+  let order = [];
+  let orderIndex = 0;
+  let groups = [];
+  let currentMap = new Map();
 
-        // Add event listener for dynamic regenerate button
-        const regenerateBtn = newCut.querySelector('.regenerate-btn');
-        regenerateBtn.addEventListener('click', () => handleRegenerate(cutItem));
+  const bestRecord = {
+    stage: Number(localStorage.getItem('bubble_best_stage') || 0),
+    seconds: Number(localStorage.getItem('bubble_best_seconds') || 0)
+  };
 
-        // Setup clear button
-        const clearBtn = newCut.querySelector('.clear-script-btn');
-        clearBtn.addEventListener('click', () => {
-            const cutEl = clearBtn.closest('.cut-item');
-            cutEl.querySelectorAll('.script-input, .script-textarea').forEach(el => el.value = '');
-        });
+  function clamp(num, min, max) {
+    return Math.max(min, Math.min(max, num));
+  }
 
-        // Copy script values from the previous cut if it exists
-        const allCuts = document.querySelectorAll('.cut-item');
-        if (allCuts.length > 0) {
-            const lastCut = allCuts[allCuts.length - 1];
-            newCut.querySelector('.script-bg').value = lastCut.querySelector('.script-bg').value;
-            newCut.querySelector('.script-camera').value = lastCut.querySelector('.script-camera').value;
-            newCut.querySelector('.script-mood').value = lastCut.querySelector('.script-mood').value;
-            newCut.querySelector('.script-elements').value = lastCut.querySelector('.script-elements').value;
-            newCut.querySelector('.script-detail').value = lastCut.querySelector('.script-detail').value;
+  function randChoice(arr) {
+    return arr[Math.floor(Math.random() * arr.length)];
+  }
+
+  function key(r, c) {
+    return `${r},${c}`;
+  }
+
+  function parseKey(k) {
+    const [r, c] = k.split(',').map(Number);
+    return { r, c };
+  }
+
+  function eightNeighbors(r, c) {
+    const list = [];
+    for (let dr = -1; dr <= 1; dr += 1) {
+      for (let dc = -1; dc <= 1; dc += 1) {
+        if (dr === 0 && dc === 0) continue;
+        list.push({ r: r + dr, c: c + dc });
+      }
+    }
+    return list;
+  }
+
+  function getGlobalFrontier(occupiedSet) {
+    const out = new Set();
+    occupiedSet.forEach((k) => {
+      const { r, c } = parseKey(k);
+      eightNeighbors(r, c).forEach((n) => {
+        if (n.c >= 0 && n.c < COLS && n.r >= 0 && !occupiedSet.has(key(n.r, n.c))) {
+          out.add(key(n.r, n.c));
         }
-
-        cutsContainer.appendChild(newCut);
-
-        // Scroll to bottom gracefully
-        cutItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
     });
+    return [...out];
+  }
 
-    // Setup initial regenerate button handler (for CUT 1)
-    const initialCut = document.querySelector('.cut-item');
-    const initialRegenerateBtn = initialCut.querySelector('.regenerate-btn');
-    initialRegenerateBtn.addEventListener('click', () => handleRegenerate(initialCut));
-
-    // Setup initial clear script button handler (for CUT 1)
-    const initialClearBtn = initialCut.querySelector('.clear-script-btn');
-    initialClearBtn.addEventListener('click', () => {
-        initialCut.querySelectorAll('.script-input, .script-textarea').forEach(el => el.value = '');
-    });
-
-    // Delete Selected Cuts
-    deleteSelectedBtn.addEventListener('click', () => {
-        const cuts = Array.from(document.querySelectorAll('.cut-item'));
-        const cutsToDelete = cuts.filter(cut => cut.querySelector('.cut-checkbox').checked);
-
-        if (cutsToDelete.length === 0) {
-            showToast('삭제할 컷을 선택해주세요.');
-            return;
+  function getGroupFrontier(groupSet, occupiedSet) {
+    const out = new Set();
+    groupSet.forEach((k) => {
+      const { r, c } = parseKey(k);
+      eightNeighbors(r, c).forEach((n) => {
+        if (n.c >= 0 && n.c < COLS && n.r >= 0) {
+          const nk = key(n.r, n.c);
+          if (!groupSet.has(nk) && !occupiedSet.has(nk)) out.add(nk);
         }
-
-        if (confirm(`선택한 ${cutsToDelete.length}개의 컷을 삭제하시겠습니까?`)) {
-            cutsToDelete.forEach(cut => cut.remove());
-
-            // If all cuts are deleted, automatically add an empty cut as a fallback
-            if (document.querySelectorAll('.cut-item').length === 0) {
-                addCutBtn.click();
-            } else {
-                updateCutNumbers(); // Update sequence numbering for existing cuts
-            }
-        }
+      });
     });
+    return [...out];
+  }
 
-    // Helper to re-sequence cut numbers
-    function updateCutNumbers() {
-        const remainingCuts = document.querySelectorAll('.cut-item');
-        remainingCuts.forEach((cut, index) => {
-            const newNum = index + 1;
-            cut.dataset.cutId = newNum;
-            const numberSpan = cut.querySelector('.cut-number');
-            if (numberSpan) {
-                numberSpan.textContent = newNum;
-            }
-        });
-        // Sync the global counter
-        cutCounter = remainingCuts.length;
+  function sortByDistance(candidates, ref) {
+    return candidates
+      .map((k) => {
+        const p = parseKey(k);
+        const d = Math.hypot(p.r - ref.r, p.c - ref.c);
+        return { k, d };
+      })
+      .sort((a, b) => a.d - b.d)
+      .map((v) => v.k);
+  }
+
+  function makeGroupSizes(total, colorCount) {
+    const arr = new Array(colorCount).fill(1);
+    let left = total - colorCount;
+    while (left > 0) {
+      const i = Math.floor(Math.random() * colorCount);
+      arr[i] += 1;
+      left -= 1;
+    }
+    return arr.sort((a, b) => b - a);
+  }
+
+  function generateStageData(stageNumber) {
+    const colorCount = Math.min(2 + Math.floor(stageNumber / 4), 8);
+    const bubbleCount = Math.min(10 + stageNumber * 2, 54);
+
+    const sizes = makeGroupSizes(bubbleCount, colorCount);
+    const colorIndexes = [...Array(colorCount)].map((_, i) => i);
+    for (let i = colorIndexes.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [colorIndexes[i], colorIndexes[j]] = [colorIndexes[j], colorIndexes[i]];
     }
 
-    // Save Selected Cuts
-    saveSelectedBtn.addEventListener('click', () => {
-        const cuts = Array.from(document.querySelectorAll('.cut-item'));
-        const cutsToSave = cuts.filter(cut => cut.querySelector('.cut-checkbox').checked);
+    const occupied = new Set();
+    const createdGroups = [];
 
-        if (cutsToSave.length === 0) {
-            showToast('저장할 컷을 선택해주세요.');
-            return;
+    for (let g = 0; g < colorCount; g += 1) {
+      const size = sizes[g];
+      const groupSet = new Set();
+      let start;
+      if (createdGroups.length === 0) {
+        start = { r: 0, c: Math.floor(COLS / 2) };
+      } else {
+        const frontier = getGlobalFrontier(occupied);
+        start = parseKey(randChoice(frontier));
+      }
+
+      const startKey = key(start.r, start.c);
+      groupSet.add(startKey);
+      occupied.add(startKey);
+      const ref = { ...start };
+
+      while (groupSet.size < size) {
+        const frontier = getGroupFrontier(groupSet, occupied);
+        if (!frontier.length) {
+          const fallback = getGlobalFrontier(occupied);
+          const chosen = parseKey(randChoice(fallback));
+          const ck = key(chosen.r, chosen.c);
+          groupSet.add(ck);
+          occupied.add(ck);
+          continue;
         }
+        const ordered = sortByDistance(frontier, ref);
+        const topTwo = ordered.slice(0, 2);
+        const pick = parseKey(randChoice(topTwo));
+        const pk = key(pick.r, pick.c);
+        groupSet.add(pk);
+        occupied.add(pk);
+      }
 
-        const validCuts = cutsToSave.filter(cut => {
-            const img = cut.querySelector('.generated-image');
-            return img.style.display !== 'none' && img.src;
-        });
+      createdGroups.push({
+        id: `g${g}`,
+        color: PALETTE[colorIndexes[g]],
+        count: groupSet.size,
+        cells: [...groupSet].map(parseKey)
+      });
+    }
 
-        if (validCuts.length === 0) {
-            showToast('선택한 컷 중 이미지가 생성된 컷이 없습니다.');
-            return;
-        }
+    const allCells = createdGroups.flatMap((g) => g.cells);
+    const minCol = Math.min(...allCells.map((p) => p.c));
+    const maxCol = Math.max(...allCells.map((p) => p.c));
+    const width = maxCol - minCol + 1;
+    const offset = Math.floor((COLS - width) / 2) - minCol;
 
-        validCuts.forEach(cut => {
-            const imgEl = cut.querySelector('.generated-image');
-            const cutNum = cut.querySelector('.cut-number')?.textContent || cut.dataset.cutId;
-            const a = document.createElement('a');
-            a.href = imgEl.src;
-            a.download = `storyboard_cut_${cutNum}.jpg`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-        });
-
-        showToast(`${validCuts.length}개의 파일 다운로드가 시작되었습니다.`, 'success');
+    createdGroups.forEach((group) => {
+      group.cells = group.cells.map((p) => ({ r: p.r, c: clamp(p.c + offset, 0, COLS - 1) }));
     });
 
-    // Toast Notification
-    function showToast(message, type = 'error') {
-        const toast = document.createElement('div');
-        toast.className = `toast ${type}`;
-        toast.textContent = message;
-        toastContainer.appendChild(toast);
-        setTimeout(() => toast.remove(), 3000); // Remove after 3 seconds
+    return {
+      colorCount,
+      bubbleCount,
+      groups: createdGroups,
+      order: [...createdGroups].sort((a, b) => b.count - a.count || a.id.localeCompare(b.id))
+    };
+  }
+
+  function drawHints() {
+    hintBarEl.innerHTML = '';
+    order.forEach((g, idx) => {
+      const item = document.createElement('div');
+      item.className = 'hint-item';
+      if (idx < orderIndex) item.classList.add('done');
+      if (idx === orderIndex) item.classList.add('current');
+
+      const dot = document.createElement('span');
+      dot.className = 'hint-dot';
+      dot.style.background = g.color;
+
+      const text = document.createElement('span');
+      text.textContent = `× ${g.count}`;
+
+      item.append(dot, text);
+      hintBarEl.appendChild(item);
+    });
+  }
+
+  function showFloatTag(text, type, fontSize) {
+    const tag = document.createElement('div');
+    tag.className = `float-tag ${type || ''}`.trim();
+    tag.textContent = text;
+    tag.style.bottom = '42px';
+    tag.style.fontSize = `${fontSize}px`;
+    floatingLayerEl.appendChild(tag);
+    setTimeout(() => tag.remove(), 800);
+  }
+
+  function updateComboBadge(animated = true) {
+    if (combo <= 0) {
+      comboBadgeEl.classList.add('hidden');
+      comboBadgeEl.classList.remove('combo-pop', 'combo-pulse');
+      return;
     }
 
-    // Generate Button Logic
-    mainGenerateBtn.addEventListener('click', () => {
-        const apiKey = document.getElementById('geminiApiKey').value.trim();
-        if (!apiKey) {
-            showToast('우측 상단에 Gemini API 키를 입력해주세요.');
-            return;
-        }
+    comboBadgeEl.textContent = `${combo} Combo`;
+    comboBadgeEl.classList.remove('hidden');
 
-        if (!selectedStyle) {
-            showToast('스타일을 먼저 선택해주세요.');
-            return;
-        }
+    if (animated) {
+      comboBadgeEl.classList.remove('combo-pop', 'combo-pulse');
+      void comboBadgeEl.offsetWidth;
+      comboBadgeEl.classList.add(combo === 1 ? 'combo-pop' : 'combo-pulse');
+    }
+  }
 
-        const cuts = Array.from(document.querySelectorAll('.cut-item'));
-        const cutsToGenerate = cuts.filter(cut => {
-            const checkbox = cut.querySelector('.cut-checkbox');
-            const hasGeneratedImage = cut.querySelector('.generated-image').style.display !== 'none';
-            // Only generate if checked AND not already generated.
-            return checkbox.checked && !hasGeneratedImage;
-        });
+  function updateRecord(remain) {
+    if (stage > bestRecord.stage) {
+      bestRecord.stage = stage;
+      bestRecord.seconds = remain;
+    } else if (stage === bestRecord.stage && remain > bestRecord.seconds) {
+      bestRecord.seconds = remain;
+    }
+    localStorage.setItem('bubble_best_stage', String(bestRecord.stage));
+    localStorage.setItem('bubble_best_seconds', String(bestRecord.seconds));
+    bestRecordEl.textContent = `Best Record Stage ${bestRecord.stage} / ${bestRecord.seconds.toFixed(1)}s`;
+  }
 
-        if (cutsToGenerate.length === 0) {
-            const checkedCuts = cuts.filter(c => c.querySelector('.cut-checkbox').checked);
-            if (checkedCuts.length === 0) {
-                showToast('생성할 컷을 하나 이상 선택해주세요.');
-            } else {
-                showToast('선택한 컷은 이미 생성되었습니다. 다시 생성하려면 컷 이미지의 [다시 생성] 버튼을 이용해주세요.');
-            }
-            return;
-        }
+  function setTimerUI() {
+    timeLeftEl.textContent = `${Math.max(0, timeLeft).toFixed(1)}s`;
+    const ratio = clamp(timeLeft / BASE_TIME, 0, 1);
+    timerFillEl.style.width = `${ratio * 100}%`;
 
-        cutsToGenerate.forEach(cut => {
-            generateCut(cut, selectedStyle);
-        });
+    if (ratio < 0.25) {
+      timerFillEl.style.background = '#e07070';
+    } else if (ratio < 0.5) {
+      timerFillEl.style.background = '#e8b84a';
+    } else {
+      timerFillEl.style.background = 'rgba(255,255,255,0.95)';
+    }
+
+    handDeg = (handDeg + 6) % 360;
+    clockHandEl.style.transform = `translate(-50%, -100%) rotate(${handDeg}deg)`;
+  }
+
+  function stopTimer() {
+    if (timerId) clearInterval(timerId);
+    timerId = null;
+  }
+
+  function startTimer() {
+    stopTimer();
+    timerId = setInterval(() => {
+      if (!isRunning) return;
+      timeLeft -= TICK_MS / 1000;
+      setTimerUI();
+      if (timeLeft <= 0) {
+        triggerGameOver('시간 초과!');
+      }
+    }, TICK_MS);
+  }
+
+  function triggerWrong() {
+    boardWrapEl.classList.remove('wrong');
+    void boardWrapEl.offsetWidth;
+    boardWrapEl.classList.add('wrong');
+  }
+
+  function triggerGameOver(reason) {
+    isRunning = false;
+    stopTimer();
+    combo = 0;
+    updateComboBadge(false);
+    overlayEl.classList.remove('hidden');
+    gameOverTextEl.textContent = `${reason} Stage ${stage}에서 종료되었습니다.`;
+  }
+
+  function removeGroup(group) {
+    group.cells.forEach((p) => {
+      const k = key(p.r, p.c);
+      const bubble = currentMap.get(k);
+      if (!bubble) return;
+
+      bubble.classList.add('pop');
+      setTimeout(() => {
+        const ghost = document.createElement('div');
+        ghost.className = 'ghost';
+        ghost.style.left = bubble.style.left;
+        ghost.style.top = bubble.style.top;
+        boardEl.appendChild(ghost);
+        bubble.remove();
+      }, 300);
+
+      currentMap.delete(k);
+    });
+  }
+
+  function onBubbleClick(groupId) {
+    if (!isRunning) return;
+
+    const target = order[orderIndex];
+    if (!target || groupId !== target.id) {
+      combo = 0;
+      updateComboBadge(false);
+      triggerWrong();
+      triggerGameOver('잘못된 순서!');
+      return;
+    }
+
+    combo += 1;
+    const bonus = (combo - 1) * 0.8;
+    if (bonus > 0) {
+      timeLeft += bonus;
+      showFloatTag(`+${bonus.toFixed(1)}s`, 'time', 16);
+    }
+
+    const comboSize = clamp(14 + (combo - 1) * 2, 14, 28);
+    showFloatTag(`${combo} Combo`, '', comboSize);
+
+    updateComboBadge(true);
+    removeGroup(target);
+    orderIndex += 1;
+    drawHints();
+
+    if (orderIndex >= order.length) {
+      clearStage();
+    }
+  }
+
+  function renderStage(stageData) {
+    boardEl.innerHTML = '';
+    floatingLayerEl.innerHTML = '';
+    currentMap.clear();
+
+    groups = stageData.groups;
+    order = stageData.order;
+    orderIndex = 0;
+
+    const maxRow = Math.max(...groups.flatMap((g) => g.cells.map((c) => c.r)));
+    boardEl.style.height = `${(maxRow + 1) * CELL + RADIUS}px`;
+
+    groups.forEach((group) => {
+      group.cells.forEach((pos) => {
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.style.background = group.color;
+        bubble.style.left = `${pos.c * CELL}px`;
+        bubble.style.top = `${pos.r * CELL}px`;
+        bubble.dataset.groupId = group.id;
+        bubble.addEventListener('click', () => onBubbleClick(group.id));
+        boardEl.appendChild(bubble);
+        currentMap.set(key(pos.r, pos.c), bubble);
+      });
     });
 
-    async function handleRegenerate(cutElement) {
-        const apiKey = document.getElementById('geminiApiKey').value.trim();
-        if (!apiKey) {
-            showToast('우측 상단에 Gemini API 키를 입력해주세요.');
-            return;
-        }
+    drawHints();
+  }
 
-        if (!selectedStyle) {
-            showToast('스타일을 먼저 선택해주세요.');
-            return;
-        }
-        generateCut(cutElement, selectedStyle);
-    }
+  function clearStage() {
+    isRunning = false;
+    stopTimer();
+    updateRecord(timeLeft);
 
-    async function generateCut(cutElement, style) {
-        const bg = cutElement.querySelector('.script-bg').value.trim();
-        const cam = cutElement.querySelector('.script-camera').value.trim();
-        const mood = cutElement.querySelector('.script-mood').value.trim();
-        const elements = cutElement.querySelector('.script-elements').value.trim();
-        const detail = cutElement.querySelector('.script-detail').value.trim();
+    boardWrapEl.classList.add('slide-out');
+    setTimeout(() => {
+      if (stage >= MAX_STAGE) {
+        overlayEl.classList.remove('hidden');
+        gameOverTextEl.textContent = '축하합니다! Stage 100까지 클리어했습니다.';
+        return;
+      }
+      stage += 1;
+      startStage(stage);
+    }, 700);
+  }
 
-        const combinedScriptParts = [];
-        if (bg) combinedScriptParts.push(`[Background/Setting] ${bg}`);
-        if (cam) combinedScriptParts.push(`[Camera Angle] ${cam}`);
-        if (mood) combinedScriptParts.push(`[Atmosphere/Mood] ${mood}`);
-        if (elements) combinedScriptParts.push(`[Key Elements] ${elements}`);
-        if (detail) combinedScriptParts.push(`[Detailed Situation] ${detail}`);
+  function startStage(n) {
+    boardWrapEl.classList.remove('slide-out', 'wrong');
+    overlayEl.classList.add('hidden');
+    stageTitleEl.textContent = `Stage ${n}`;
 
-        const scriptText = combinedScriptParts.join(', ');
+    combo = 0;
+    timeLeft = BASE_TIME;
+    handDeg = 0;
+    updateComboBadge(false);
+    setTimerUI();
 
-        const placeholder = cutElement.querySelector('.image-placeholder');
-        const imgEl = cutElement.querySelector('.generated-image');
-        const regenBtn = cutElement.querySelector('.regenerate-btn');
-        const loader = placeholder.querySelector('.loader');
-        const placeholderText = placeholder.querySelector('.placeholder-text');
+    const data = generateStageData(n);
+    renderStage(data);
 
-        if (!scriptText) {
-            showToast(`CUT ${cutElement.dataset.cutId}의 스크립트를 하나 이상 작성해주세요.`);
-            return;
-        }
+    isRunning = true;
+    startTimer();
+  }
 
-        // UI Loading State
-        placeholderText.style.display = 'none';
-        loader.style.display = 'block';
-        imgEl.style.display = 'none';
-        regenBtn.style.display = 'none';
+  restartBtn.addEventListener('click', () => {
+    stage = 1;
+    startStage(stage);
+  });
 
-        try {
-            const resultUrl = await callGeminiAPI(scriptText, style);
-
-            // Set image and reveal
-            imgEl.src = resultUrl;
-            imgEl.style.display = 'block';
-            regenBtn.style.display = 'block'; // Ensure regenerate button is active
-        } catch (error) {
-            showToast(`CUT ${cutElement.dataset.cutId} 생성 실패: ${error.message}`);
-            placeholderText.style.display = 'block';
-            imgEl.style.display = 'none';
-        } finally {
-            loader.style.display = 'none';
-        }
-    }
-
-    async function callGeminiAPI(prompt, style) {
-        const apiKey = document.getElementById('geminiApiKey').value.trim();
-
-        if (!apiKey) {
-            throw new Error("API 키가 없습니다.");
-        }
-
-        // Gemini Imagen 4 Generation API
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict`;
-
-        const stylePrefix = style === 'linedrawing'
-            ? "A high-quality webtoon style illustration in grayscale. Clean black line art with soft monochrome shading. Slice-of-life atmosphere. The characters have expressive features and a modern Korean manhwa aesthetic. No vibrant colors, only black, white, and varying tones of gray. "
-            : "never vertical, never square, semi-realistic emotional editorial illustration style, realistic human facial structure and proportions, based on real-life facial features rather than webtoon or cartoon styling, soft refined digital painting, delicate and polished rendering, thin clean dark-brown linework instead of black outlines, subtle contour lines, warm muted sepia-beige palette, creamy ivory highlights, soft sand beige, warm gray, dusty brown midtones, low saturation, gentle natural skin shading, soft and believable facial modeling, calm realistic eyes, nose, and lips with no exaggeration, elegant restrained expressions, natural hair rendered in smooth masses rather than sharp strands, softly organized realistic background treatment, clean and uncluttered spatial detail, warm diffused indoor light or gentle natural light, subtle bloom in bright areas, airy atmosphere, tender and calm lifestyle-drama mood, premium hospital brochure or emotional advertisement illustration tone, realistic but softened visual finish, cinematic still-frame feeling, polished and understated image quality, no comic feeling, no manga feeling, no webtoon style, no cel shading, no chibi proportions, no exaggerated anime eyes, no thick black outlines, no saturated colors, no neon tones, no slapstick expressions, no harsh contrast, no gritty texture, no glossy 3D render look, no photoreal skin pores, no hard rim light, no overly dramatic shadows. ";
-
-        const fullPrompt = stylePrefix + prompt;
-
-        try {
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-goog-api-key': apiKey
-                },
-                body: JSON.stringify({
-                    instances: [
-                        { prompt: fullPrompt }
-                    ],
-                    parameters: {
-                        sampleCount: 1,
-                        aspectRatio: "4:3"
-                    }
-                })
-            });
-
-            if (!response.ok) {
-                const err = await response.json();
-                throw new Error(err.error?.message || 'API request failed');
-            }
-
-            const data = await response.json();
-
-            if (data && data.predictions && data.predictions.length > 0) {
-                const base64Image = data.predictions[0].bytesBase64Encoded;
-                return `data:image/jpeg;base64,${base64Image}`;
-            } else {
-                throw new Error("No image data returned from API.");
-            }
-        } catch (error) {
-            console.error(error);
-            throw error;
-        }
-    }
-});
+  bestRecordEl.textContent = `Best Record Stage ${bestRecord.stage} / ${bestRecord.seconds.toFixed(1)}s`;
+  startStage(stage);
+})();
